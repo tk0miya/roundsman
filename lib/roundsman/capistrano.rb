@@ -217,7 +217,7 @@ require 'tempfile'
 
       def install_chef?
         required_version = fetch(:chef_version).inspect
-        output = capture("#{fetch(:gem_path).inspect} list -i -v #{required_version} || true").strip
+        output = capture("#{fetch(:gem_path).inspect} list -i -v #{required_version} || true", :via => :sudo).strip
         output == "false"
       end
 
