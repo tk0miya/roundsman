@@ -176,6 +176,7 @@ require 'tempfile'
       set_default :cookbooks_directory, ["config/cookbooks"]
       set_default :copyfile_disable, false
       set_default :filter_sensitive_settings, [ /password/, /filter_sensitive_settings/ ]
+      set_default :gem_path, "/usr/local/bin/gem"
 
       task :default, :except => { :no_release => true } do
         ensure_cookbooks_exists
@@ -194,9 +195,9 @@ require 'tempfile'
 
       desc "Installs chef"
       task :install, :except => { :no_release => true } do
-        sudo "gem uninstall -xaI chef || true"
-        sudo "gem install chef -v #{fetch(:chef_version).inspect} --quiet --no-ri --no-rdoc"
-        sudo "gem install ruby-shadow --quiet --no-ri --no-rdoc"
+        sudo "#{fetch(:gem_path).inspect} uninstall -xaI chef || true"
+        sudo "#{fetch(:gem_path).inspect} install chef -v #{fetch(:chef_version).inspect} --quiet --no-ri --no-rdoc"
+        sudo "#{fetch(:gem_path).inspect} install ruby-shadow --quiet --no-ri --no-rdoc"
       end
 
       desc "Runs the existing chef configuration"
@@ -216,7 +217,7 @@ require 'tempfile'
 
       def install_chef?
         required_version = fetch(:chef_version).inspect
-        output = capture("gem list -i -v #{required_version} || true").strip
+        output = capture("#{fetch(:gem_path).inspect} list -i -v #{required_version} || true").strip
         output == "false"
       end
 
