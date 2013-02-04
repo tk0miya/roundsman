@@ -174,6 +174,7 @@ require 'tempfile'
 
       set_default :chef_version, "~> 10.18.2"
       set_default :cookbooks_directory, ["config/cookbooks"]
+      set_default :databags_directory, "config/data_bags"
       set_default :copyfile_disable, false
       set_default :verbose_logging, true
       set_default :filter_sensitive_settings, [ /password/, /filter_sensitive_settings/ ]
@@ -216,6 +217,11 @@ require 'tempfile'
         Array(fetch(:cookbooks_directory)).select { |path| File.exist?(path) }
       end
 
+      def databags_path
+        path = fetch(:databags_directory) 
+        File.exist?(path) ? path : nil
+      end
+
       def install_chef?
         required_version = fetch(:chef_version).inspect
         output = capture("#{fetch(:gem_path).inspect} list -i -v #{required_version} || true", :via => :sudo).strip
@@ -228,6 +234,7 @@ require 'tempfile'
           root = File.expand_path(File.dirname(__FILE__))
           file_cache_path File.join(root, "cache")
           cookbook_path [ #{cookbook_string} ]
+          data_bag_path File.join(root, #{fetch(:databags_directory).to_s.inspect})
           verbose_logging #{fetch(:verbose_logging)}
         RUBY
         put solo_rb, roundsman_working_dir("solo.rb"), :via => :scp
@@ -271,7 +278,7 @@ require 'tempfile'
         begin
           tar_file.close
           env_vars = fetch(:copyfile_disable) && RUBY_PLATFORM.downcase.include?('darwin') ? "COPYFILE_DISABLE=true" : ""
-          system "#{env_vars} tar -cjf #{tar_file.path} #{cookbooks_paths.join(' ')}"
+          system "#{env_vars} tar -cjf #{tar_file.path} #{cookbooks_paths.join(' ')} #{databags_path.to_s}"
           upload tar_file.path, roundsman_working_dir("cookbooks.tar"), :via => :scp
           run "cd #{roundsman_working_dir} && tar -xjf cookbooks.tar"
         ensure
