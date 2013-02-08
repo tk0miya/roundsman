@@ -99,23 +99,32 @@ require 'active_support/core_ext/hash/deep_merge'
     end
 
     def install_ruby?
-      installed_version = capture("ruby --version || true").strip
-      if installed_version.include?("not found")
-        logger.info "No version of Ruby could be found."
-        return true
-      end
-      required_version = fetch(:ruby_version).gsub("-", "")
-      if fetch(:care_about_ruby_version)
-        if installed_version.include?(required_version)
-          logger.info "Ruby #{installed_version} matches the required version: #{required_version}."
+      if fetch(:ruby_install_method) == :omnibus_chef
+        ruby_path = capture("ls /opt/chef/embedded/bin/ruby || true").strip
+        if ruby_path.include?("ruby")
           return false
         else
-          logger.info "Ruby version mismatch. Installed version: #{installed_version}, required is #{required_version}"
           return true
         end
       else
-        logger.info "Already installed Ruby #{installed_version}, not #{required_version}. Set :care_about_ruby_version if you want to fix this."
-        return false
+        installed_version = capture("ruby --version || true").strip
+        if installed_version.include?("not found")
+          logger.info "No version of Ruby could be found."
+          return true
+        end
+        required_version = fetch(:ruby_version).gsub("-", "")
+        if fetch(:care_about_ruby_version)
+          if installed_version.include?(required_version)
+            logger.info "Ruby #{installed_version} matches the required version: #{required_version}."
+            return false
+          else
+            logger.info "Ruby version mismatch. Installed version: #{installed_version}, required is #{required_version}"
+            return true
+          end
+        else
+          logger.info "Already installed Ruby #{installed_version}, not #{required_version}. Set :care_about_ruby_version if you want to fix this."
+          return false
+        end
       end
     end
 
@@ -125,6 +134,7 @@ require 'active_support/core_ext/hash/deep_merge'
       set_default :ruby_version, "1.9.3-p194"
       set_default :care_about_ruby_version, true
       set_default :ruby_install_dir, "/usr/local"
+      set_default :ruby_install_method, :default
 
       set_default :ruby_dependencies do
         %w(git-core curl build-essential bison openssl
@@ -154,15 +164,21 @@ require 'active_support/core_ext/hash/deep_merge'
 
       desc "Installs ruby."
       task :ruby, :except => { :no_release => true } do
-        put fetch(:ruby_install_script), roundsman_working_dir("install_ruby.sh"), :via => :scp
-        sudo "bash #{roundsman_working_dir("install_ruby.sh")}"
+        if fetch(:ruby_install_method) == :default
+          put fetch(:ruby_install_script), roundsman_working_dir("install_ruby.sh"), :via => :scp
+          sudo "bash #{roundsman_working_dir("install_ruby.sh")}"
+        else
+          run "curl -L #{fetch(:chef_omnibus_installer_url)} | #{top.sudo} bash"
+        end
       end
 
       desc "Installs the dependencies needed for Ruby"
       task :dependencies, :except => { :no_release => true } do
-        ensure_supported_distro
-        sudo "#{fetch(:package_manager)} -yq update"
-        sudo "#{fetch(:package_manager)} -yq install #{fetch(:ruby_dependencies).join(' ')}"
+        if fetch(:ruby_install_method) == :default
+          ensure_supported_distro
+          sudo "#{fetch(:package_manager)} -yq update"
+          sudo "#{fetch(:package_manager)} -yq install #{fetch(:ruby_dependencies).join(' ')}"
+        end
       end
 
       desc "Checks if the ruby version installed matches the version specified"
@@ -184,6 +200,7 @@ require 'active_support/core_ext/hash/deep_merge'
     namespace :chef do
 
       set_default :chef_version, "~> 10.18.2"
+      set_default :chef_omnibus_installer_url, 'http://www.opscode.com/chef/install.sh'
       set_default :chef_attributes, Hash.new
       set_default :cookbooks_directory, ["config/cookbooks"]
       set_default :roles_directory, "config/roles"
@@ -228,7 +245,13 @@ require 'active_support/core_ext/hash/deep_merge'
           self[:sudo] = "rvmsudo_secure_path=1 #{File.join(rvm_bin_path, "rvmsudo")}"
         end
 
-        sudo "chef-solo -c #{roundsman_working_dir("solo.rb")} -j #{roundsman_working_dir("solo.json")}#{' -l debug' if fetch(:debug_chef)}"
+        if fetch(:ruby_install_method) == :omnibus_chef
+          chef_solo_path = "/opt/chef/bin/chef-solo"
+        else
+          chef_solo_path = "chef-solo"
+        end
+
+        sudo "#{chef_solo_path} -c #{roundsman_working_dir("solo.rb")} -j #{roundsman_working_dir("solo.json")}#{' -l debug' if fetch(:debug_chef)}"
         self[:sudo] = old_sudo
       end
 
@@ -247,9 +270,13 @@ require 'active_support/core_ext/hash/deep_merge'
       end
 
       def install_chef?
-        required_version = fetch(:chef_version).inspect
-        output = capture("gem list -i -v #{required_version} || true").strip
-        output == "false"
+        if fetch(:ruby_install_method) == :omnibus_chef
+          false
+        else
+          required_version = fetch(:chef_version).inspect
+          output = capture("gem list -i -v #{required_version} || true").strip
+          output == "false"
+        end
       end
 
       def generate_config
