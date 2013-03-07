@@ -230,6 +230,10 @@ require 'active_support/core_ext/hash/deep_merge'
           run "gem uninstall -xaI chef || true"
           run "gem install chef -v #{fetch(:chef_version).inspect} --quiet --no-ri --no-rdoc"
           run "gem install ruby-shadow --quiet --no-ri --no-rdoc"
+
+          if self[:rbenv_path]
+            run "rbenv rehash"
+          end
         else
           sudo "gem uninstall -xaI chef || true"
           sudo "gem install chef -v #{fetch(:chef_version).inspect} --quiet --no-ri --no-rdoc"
