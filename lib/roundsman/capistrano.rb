@@ -1,19 +1,7 @@
 require 'json'
 require 'tempfile'
-require 'active_support/core_ext/hash/deep_merge'
 
 ::Capistrano::Configuration.instance(:must_exist).load do
-
-  def set_chef_roles(*roles)
-    attributes = fetch(:chef_attributes)
-    roles.each do |role|
-      json_path = "#{fetch(:roles_directory)}/#{role.to_s}.json"
-      attributes.deep_merge! JSON.load(File.new(json_path))
-    end
-    if attributes["run_list"]
-      set :run_list, attributes["run_list"]
-    end
-  end
 
   namespace :roundsman do
 
@@ -43,13 +31,17 @@ require 'active_support/core_ext/hash/deep_merge'
       File.join(fetch(:roundsman_working_dir), *path)
     end
 
-    def sudo(command, *args)
+    def sudocmd
       envvars = (self[:default_environment] || {}).collect{|k, v| "#{k}=#{v}"}
       if envvars
-        run "#{top.sudo} env #{envvars.join(" ")} #{command}", *args
+        "#{top.sudo} env #{envvars.join(" ")}"
       else
-        run "#{top.sudo} #{command}", *args
+        top.sudo
       end
+    end
+
+    def sudo(command, *args)
+      run "#{sudocmd} #{command}", *args
     end
 
     def run(*args)
@@ -201,15 +193,16 @@ require 'active_support/core_ext/hash/deep_merge'
 
       set_default :chef_version, "~> 10.18.2"
       set_default :chef_omnibus_installer_url, 'http://www.opscode.com/chef/install.sh'
-      set_default :chef_attributes, Hash.new
       set_default :cookbooks_directory, ["config/cookbooks"]
       set_default :roles_directory, "config/roles"
       set_default :databags_directory, "config/data_bags"
       set_default :copyfile_disable, false
       set_default :verbose_logging, true
+      set_default :chef_roles_auto_discovery, false
       set_default :filter_sensitive_settings, [ /password/, /filter_sensitive_settings/ ]
 
       task :default, :except => { :no_release => true } do
+        discover_roles_for_servers
         ensure_cookbooks_exists
         prepare_chef
         chef_solo
@@ -243,7 +236,13 @@ require 'active_support/core_ext/hash/deep_merge'
 
       desc "Runs the existing chef configuration"
       task :chef_solo, :except => { :no_release => true } do
-        logger.info "Now running #{fetch(:run_list).join(', ')}"
+        if fetch(:chef_roles_auto_discovery)
+          run_list = discovered_run_lists.flatten.uniq
+        else
+          run_list = fetch(:run_list)
+        end
+
+        logger.info "Now running #{fetch(:run_list, []).join(', ')}"
         old_sudo = self[:sudo]
         if self[:rvm_type] == :user
           self[:sudo] = "rvmsudo_secure_path=1 #{File.join(rvm_bin_path, "rvmsudo")}"
@@ -255,17 +254,53 @@ require 'active_support/core_ext/hash/deep_merge'
           chef_solo_path = "chef-solo"
         end
 
-        sudo "#{chef_solo_path} -c #{roundsman_working_dir("solo.rb")} -j #{roundsman_working_dir("solo.json")}#{' -l debug' if fetch(:debug_chef)}"
+        command = "#{chef_solo_path} -c #{roundsman_working_dir("solo.rb")} -j #{roundsman_working_dir("solo.json")}#{' -l debug' if fetch(:debug_chef)}"
+        if fetch(:chef_roles_auto_discovery)
+          parallel do |session|
+            session.when "options[:run_list].size > 0",
+              "#{sudocmd} #{command}"
+          end
+        else
+          sudo command
+        end
         self[:sudo] = old_sudo
       end
 
+      def discover_roles_for_servers
+        if fetch(:chef_roles_auto_discovery)
+          find_servers_for_task(current_task).each do |server|
+            server.options[:run_list] = fetch(:run_list, [])
+
+            role_names_for_host(server).each do |role|
+              server.options[:run_list] << "role[#{role}]"  if role_exists?(role)
+            end
+          end
+        end
+      end
+
+      def discovered_run_lists
+        find_servers_for_task(current_task).collect{|server| server.options[:run_list]}.compact
+      end
+
       def ensure_cookbooks_exists
-        abort "You must specify at least one recipe when running roundsman.chef" if fetch(:run_list, []).empty?
+        if fetch(:chef_roles_auto_discovery)
+          if discovered_run_lists.all?{|run_list| run_list.empty?}
+            abort "You must specify at least one recipe when running roundsman.chef"
+          end
+        else
+          abort "You must specify at least one recipe when running roundsman.chef" if fetch(:run_list, []).empty?
+        end
+
         abort "No cookbooks found in #{fetch(:cookbooks_directory).inspect}" if cookbooks_paths.empty?
       end
 
       def cookbooks_paths
         Array(fetch(:cookbooks_directory)).select { |path| File.exist?(path) }
+      end
+
+      def roles_path
+        path = fetch(:roles_directory)
+        File.exist?(path) ? path : nil
       end
 
       def databags_path
@@ -283,6 +318,11 @@ require 'active_support/core_ext/hash/deep_merge'
         end
       end
 
+      def role_exists?(name)
+         File.exist?(File.join(fetch(:roles_directory), name.to_s + ".json")) ||
+         File.exist?(File.join(fetch(:roles_directory), name.to_s + ".rb"))
+      end
+
       def generate_config
         cookbook_string = cookbooks_paths.map { |c| "File.join(root, #{c.to_s.inspect})" }.join(', ')
         solo_rb = <<-RUBY
@@ -290,18 +330,23 @@ require 'active_support/core_ext/hash/deep_merge'
           file_cache_path File.join(root, "cache")
           cookbook_path [ #{cookbook_string} ]
           verbose_logging #{fetch(:verbose_logging)}
+          role_path File.join(root, #{fetch(:roles_directory).to_s.inspect})
           data_bag_path File.join(root, #{fetch(:databags_directory).to_s.inspect})
         RUBY
         put solo_rb, roundsman_working_dir("solo.rb"), :via => :scp
       end
 
       def generate_attributes
-        if fetch(:chef_attributes)
-          attrs = fetch(:chef_attributes)
+        if fetch(:chef_roles_auto_discovery)
+          find_servers_for_task(current_task).each do |server|
+            attrs = remove_procs_from_hash variables.dup
+            attrs[:run_list] = server.options[:run_list]
+            put attrs.to_json, roundsman_working_dir("solo.json"), :hosts => server.host, :via => :scp
+          end
         else
-          attrs = remove_procs_from_hash variables.dup
+            attrs = remove_procs_from_hash variables.dup
+            put attrs.to_json, roundsman_working_dir("solo.json"), :via => :scp
         end
-        put attrs.to_json, roundsman_working_dir("solo.json"), :via => :scp
       end
 
       # Recursively removes procs from hashes. Procs can exist because you specified them like this:
@@ -337,7 +382,7 @@ require 'active_support/core_ext/hash/deep_merge'
         begin
           tar_file.close
           env_vars = fetch(:copyfile_disable) && RUBY_PLATFORM.downcase.include?('darwin') ? "COPYFILE_DISABLE=true" : ""
-          system "#{env_vars} tar -cjf #{tar_file.path} #{cookbooks_paths.join(' ')} #{databags_path.to_s}"
+          system "#{env_vars} tar -cjf #{tar_file.path} #{cookbooks_paths.join(' ')} #{roles_path.to_s} #{databags_path.to_s}"
           upload tar_file.path, roundsman_working_dir("cookbooks.tar"), :via => :scp
           run "cd #{roundsman_working_dir} && tar -xjf cookbooks.tar"
         ensure
